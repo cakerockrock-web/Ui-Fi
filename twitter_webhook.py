@@ -43,73 +43,80 @@ def fetch_tweets_syndication(username):
         data = json.loads(json_str)
         timeline = data.get("props", {}).get("pageProps", {}).get("timeline", {}).get("entries", [])
         
-        all_tweets = []
+        tweets = []
         for entry in timeline:
-            if entry.get("type") == "tweet":
-                t = entry.get("content", {}).get("tweet", {})
-                if not t:
-                    continue
-                
-                # ข้าม Retweet
-                if t.get("retweeted_status_id_str"):
-                    continue
-                
-                t_id = str(t.get("id_str"))
-                raw_text = t.get("text", "")
+            # ข้าม entry ที่ไม่ใช่ทวีต หรือเป็นก้อนปักหมุดพิเศษ
+            entry_type = entry.get("type")
+            if entry_type != "tweet":
+                continue
+            
+            # ตรวจจับว่า entry นี้มีระบุว่าเป็น pinned หรือไม่
+            if entry.get("entryType") == "pinned" or entry.get("isPinned"):
+                continue
 
-                # เช็กว่าเป็น X Article หรือไม่
-                urls = t.get("entities", {}).get("urls", [])
-                is_article = False
-                for u in urls:
-                    expanded = u.get("expanded_url", "")
-                    if "/article/" in expanded:
-                        is_article = True
-                        break
+            content = entry.get("content", {})
+            t = content.get("tweet", {})
+            if not t:
+                continue
+            
+            # ข้าม Retweet
+            if t.get("retweeted_status_id_str"):
+                continue
 
-                # เช็กวิดีโอ หรือ Animated GIF
-                media = t.get("entities", {}).get("media", [])
-                has_video = False
-                img_url = None
-                
-                if media:
-                    media_type = media[0].get("type", "")
-                    if media_type in ["video", "animated_gif"]:
-                        has_video = True
-                    else:
-                        img_url = media[0].get("media_url_https")
+            # ตรวจสอบเพิ่มเติมในระดับตัว tweet object ว่าเป็น pinned หรือไม่
+            if t.get("pinned") or t.get("is_pinned"):
+                continue
+            
+            t_id = str(t.get("id_str"))
+            raw_text = t.get("text", "")
 
-                if is_article:
-                    tweet_url = f"https://x.com/{username}/article/{t_id}"
+            # 1. เช็กว่าเป็น X Article หรือไม่
+            urls = t.get("entities", {}).get("urls", [])
+            is_article = False
+            for u in urls:
+                expanded = u.get("expanded_url", "")
+                if "/article/" in expanded:
+                    is_article = True
+                    break
+
+            # 2. เช็กวิดีโอ หรือ Animated GIF
+            media = t.get("entities", {}).get("media", [])
+            has_video = False
+            img_url = None
+            
+            if media:
+                media_type = media[0].get("type", "")
+                if media_type in ["video", "animated_gif"]:
+                    has_video = True
                 else:
-                    tweet_url = f"https://x.com/{username}/status/{t_id}"
+                    img_url = media[0].get("media_url_https")
 
-                clean_text = re.sub(r'https://t\.co/\S+$', '', raw_text).strip()
-                lines = [line.strip() for line in (clean_text or raw_text).split("\n") if line.strip()]
-                title = lines[0] if lines else f"Post from @{username}"
-                description = "\n".join(lines[1:]) if len(lines) > 1 else ""
+            if is_article:
+                tweet_url = f"https://x.com/{username}/article/{t_id}"
+            else:
+                tweet_url = f"https://x.com/{username}/status/{t_id}"
 
-                if len(title) > 250:
-                    title = title[:247] + "..."
-                if len(description) > 3000:
-                    description = description[:2997] + "..."
+            clean_text = re.sub(r'https://t\.co/\S+$', '', raw_text).strip()
+            lines = [line.strip() for line in (clean_text or raw_text).split("\n") if line.strip()]
+            title = lines[0] if lines else f"Post from @{username}"
+            description = "\n".join(lines[1:]) if len(lines) > 1 else ""
 
-                all_tweets.append({
-                    "id": t_id,
-                    "title": title,
-                    "description": description,
-                    "tweet_url": tweet_url,
-                    "is_article": is_article,
-                    "has_video": has_video,
-                    "image_url": img_url
-                })
+            if len(title) > 250:
+                title = title[:247] + "..."
+            if len(description) > 3000:
+                description = description[:2997] + "..."
 
-        # กำจัดทวีตซ้ำ (กรณี Pin ไปซ้ำกับไทม์ไลน์ปกติ)
-        unique_tweets = {t["id"]: t for t in all_tweets}.values()
-        
-        # เรียงลำดับจาก "ใหม่สุด -> เก่าสุด" ตาม Snowflake ID (ยิ่งเลขมาก แปลว่ายิ่งโพสต์ใหม่)
-        sorted_tweets = sorted(unique_tweets, key=lambda x: int(x["id"]) if x["id"].isdigit() else 0, reverse=True)
-        
-        return sorted_tweets
+            tweets.append({
+                "id": t_id,
+                "title": title,
+                "description": description,
+                "tweet_url": tweet_url,
+                "is_article": is_article,
+                "has_video": has_video,
+                "image_url": img_url
+            })
+
+        return tweets
     except Exception as e:
         print(f"Fetch error: {e}")
         return []
@@ -166,32 +173,34 @@ def run():
         print("No tweets fetched.")
         return
 
-    # คัดเลือก 5 โพสต์ล่าสุดจริงๆ โดยไม่สนใจว่าจะมี Pin คั่นอยู่ตรงไหน
-    top_5_tweets = tweets[:5]
-    print(f"Fetched {len(tweets)} tweets. Checking top 5 newest:")
-    for t in top_5_tweets:
-        print(f" - ID: {t['id']} | Title: {t['title'][:30]}")
+    # แสดงรายการทวีตทั้งหมดที่ดึงมาได้ใน Log เพื่อตรวจสอบ
+    print(f"--- Fetched {len(tweets)} normal tweets (Excluding pins) ---")
+    for idx, t in enumerate(tweets[:5]):
+        print(f"[{idx+1}] ID: {t['id']} | Title: {t['title'][:40]}")
 
-    # รันรอบแรกสุด ให้จำ 5 โพสต์ล่าสุดนี้ไว้ทั้งหมด
+    # ดึง 5 โพสต์ล่าสุดจริงจากลำดับไทม์ไลน์
+    recent_5_tweets = tweets[:5]
+
+    # ถ้ารันครั้งแรกสุด ให้จำ 5 ทวีตนี้ไว้ทันที
     if not seen_ids:
-        save_last_ids([t["id"] for t in top_5_tweets])
-        print("Initial run: Synced top 5 IDs. No posts sent.")
+        save_last_ids([t["id"] for t in recent_5_tweets])
+        print("Initial run: Synced 5 IDs. No posts sent.")
         return
 
-    # ตรวจสอบใน 5 โพสต์ล่าสุด ว่ามีอันไหนที่ยังไม่เคยส่งเข้า Discord
-    new_tweets = [t for t in top_5_tweets if t["id"] not in seen_ids]
+    # ตรวจสอบว่าใน 5 ทวีตล่าสุด มีอันไหนยังไม่เคยส่งบ้าง
+    new_tweets = [t for t in recent_5_tweets if t["id"] not in seen_ids]
 
     if new_tweets:
-        # เรียงลำดับส่งจากเก่าไปใหม่ เพื่อให้ทวีตเรียงไทม์ไลน์สวยๆ ใน Discord
         for t in reversed(new_tweets):
             post_tweet(t)
             seen_ids.append(t["id"])
             time.sleep(1.5)
 
-    # บันทึก ID ทั้งหมดที่ผ่านตาเก็บไว้ในประวัติ ป้องกันส่งซ้ำ
-    all_seen = list(dict.fromkeys(seen_ids + [t["id"] for t in top_5_tweets]))
+    # อัปเดตประวัติ ID ทั้งหมดที่ดึงมาเก็บไว้ในไฟล์
+    current_ids = [t["id"] for t in recent_5_tweets]
+    all_seen = list(dict.fromkeys(seen_ids + current_ids))
     save_last_ids(all_seen[-200:])
-    print(f"Done. Posted {len(new_tweets)} new tweets.")
+    print(f"Sync complete. New tweets posted: {len(new_tweets)}")
 
 if __name__ == "__main__":
     run()
