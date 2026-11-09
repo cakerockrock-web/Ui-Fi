@@ -13,7 +13,7 @@ def load_last_ids():
         try:
             with open(STORAGE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return [str(x).strip() for x in data if str(x).strip() and str(x).strip() != "0"]
+                return [str(x).strip() for x in data if str(x).strip()]
         except Exception:
             return []
     return []
@@ -51,7 +51,7 @@ def fetch_tweets_syndication(username):
                 t_id = str(t.get("id_str"))
                 raw_text = t.get("text", "")
 
-                # 1. ตรวจสอบว่าโพสต์นี้เป็น X Article หรือไม่
+                # 1. เช็กว่าเป็น X Article หรือไม่
                 urls = t.get("entities", {}).get("urls", [])
                 is_article = False
                 for u in urls:
@@ -60,7 +60,7 @@ def fetch_tweets_syndication(username):
                         is_article = True
                         break
 
-                # 2. ตรวจสอบว่ามีคลิปวิดีโอ หรือ Animated GIF หรือไม่
+                # 2. เช็กวิดีโอ หรือ Animated GIF
                 media = t.get("entities", {}).get("media", [])
                 has_video = False
                 img_url = None
@@ -72,13 +72,11 @@ def fetch_tweets_syndication(username):
                     else:
                         img_url = media[0].get("media_url_https")
 
-                # กำหนด URL ของทวีต
                 if is_article:
                     tweet_url = f"https://x.com/{username}/article/{t_id}"
                 else:
                     tweet_url = f"https://x.com/{username}/status/{t_id}"
 
-                # จัดการข้อความ
                 clean_text = re.sub(r'https://t\.co/\S+$', '', raw_text).strip()
                 lines = [line.strip() for line in (clean_text or raw_text).split("\n") if line.strip()]
                 title = lines[0] if lines else f"Post from @{username}"
@@ -122,18 +120,10 @@ def send_to_webhook(payload):
 def post_tweet(tweet):
     t_id = tweet["id"]
     
-    # กรณี 1: เป็น X Article ให้ส่งลิงก์ article โดยตรง เพื่อให้ Discord ดึงการ์ดทางการของ X มาแสดง
     if tweet["is_article"]:
-        payload = {
-            "content": tweet["tweet_url"]
-        }
-    # กรณี 2: เป็นคลิปวิดีโอหรือ GIF ใช้ fixupx เพื่อเปิดเครื่องเล่นคลิปในดิสคอร์ด
+        payload = {"content": tweet["tweet_url"]}
     elif tweet["has_video"]:
-        fixup_url = f"https://fixupx.com/{TARGET_USERNAME}/status/{t_id}"
-        payload = {
-            "content": fixup_url
-        }
-    # กรณี 3: รูปภาพหรือข้อความทั่วไป ส่งกล่อง Embed สีฟ้า
+        payload = {"content": f"https://fixupx.com/{TARGET_USERNAME}/status/{t_id}"}
     else:
         embed = {
             "title": tweet["title"],
@@ -163,26 +153,30 @@ def run():
         print("No tweets fetched.")
         return
 
-    # กรณีรันครั้งแรกสุด
+    # ล็อกขอบเขต: ดึงพิจารณาเฉพาะ 5 โพสต์ล่าสุดบนสุดของไทม์ไลน์เท่านั้น
+    recent_5_tweets = tweets[:5]
+
+    # เริ่มต้นระบบครั้งแรกสุด ให้จดจำ 5 โพสต์ล่าสุดนี้ไว้ทันที
     if not seen_ids:
-        all_ids = [t["id"] for t in tweets]
-        save_last_ids(all_ids)
-        print("Initial run: Synced current tweet IDs. No posts sent.")
+        save_last_ids([t["id"] for t in recent_5_tweets])
+        print("Initial run: Synced current 5 tweet IDs. No posts sent.")
         return
 
-    max_seen_id = max([int(x) for x in seen_ids if x.isdigit()])
-    truly_new_tweets = [t for t in tweets if t["id"].isdigit() and int(t["id"]) > max_seen_id]
+    # ตรวจเฉพาะในกลุ่ม 5 โพสต์ล่าสุดว่ามี ID ไหนที่ยังไม่เคยส่ง
+    new_tweets = [t for t in recent_5_tweets if t["id"] not in seen_ids]
 
-    if truly_new_tweets:
-        truly_new_tweets.sort(key=lambda x: int(x["id"]))
-        for t in truly_new_tweets[:2]:
+    if new_tweets:
+        # เรียงลำดับจากเก่าไปใหม่ เพื่อส่งเข้า Discord ตามลำดับเวลา
+        for t in reversed(new_tweets):
             post_tweet(t)
+            seen_ids.append(t["id"])
             time.sleep(1.5)
 
-    current_ids = [t["id"] for t in tweets]
-    updated_ids = list(dict.fromkeys(seen_ids + current_ids))
-    save_last_ids(updated_ids[-100:])
-    print(f"Sync complete. New tweets posted: {len(truly_new_tweets)}")
+    # อัปเดต ID ทั้งหมดที่ผ่านตาลงไฟล์ ป้องกันการย้อนกลับมาส่งซ้ำ
+    current_ids = [t["id"] for t in recent_5_tweets]
+    all_seen = list(dict.fromkeys(seen_ids + current_ids))
+    save_last_ids(all_seen[-200:])
+    print(f"Sync complete. New tweets posted: {len(new_tweets)}")
 
 if __name__ == "__main__":
     run()
