@@ -47,26 +47,23 @@ def fetch_latest_5():
         if entry.get("type") != "tweet":
             continue
 
-        # ข้ามโพสต์ปักหมุดทุกประเภท
-        if entry.get("entryType") == "pinned":
-            continue
-
         t = entry.get("content", {}).get("tweet", {})
-        if not t or t.get("retweeted_status_id_str") or t.get("pinned"):
+        if not t or t.get("retweeted_status_id_str"):
             continue
 
         t_id = str(t.get("id_str"))
         urls = t.get("entities", {}).get("urls", [])
         is_article = any("/article/" in u.get("expanded_url", "") for u in urls)
 
+        # Article ใช้ x.com ธรรมดา / ทวีตทั่วไปใช้ fixupx
         if is_article:
-            url_to_send = f"https://fixupx.com/{USERNAME}/article/{t_id}"
+            url_to_send = f"https://x.com/{USERNAME}/article/{t_id}"
         else:
             url_to_send = f"https://fixupx.com/{USERNAME}/status/{t_id}"
 
         tweets.append({"id": t_id, "url": url_to_send})
 
-    # ดึงเฉพาะ 5 โพสต์ล่าสุด
+    # ดึง 5 โพสต์บนสุด
     return tweets[:5]
 
 def send_discord(url):
@@ -88,7 +85,6 @@ def main():
     seen_ids = load_seen()
     is_test = False
 
-    # ตรวจสอบว่าเป็นการทดสอบครั้งแรกหรือมี '0' ในไฟล์
     if os.path.exists(STORAGE_FILE):
         try:
             with open(STORAGE_FILE, "r", encoding="utf-8") as f:
@@ -104,6 +100,21 @@ def main():
     if not tweets:
         print("No tweets found.")
         return
+
+    if is_test:
+        to_post = list(tweets)
+    else:
+        to_post = [t for t in tweets if t["id"] not in seen_ids]
+
+    # ส่งเรียงตามลำดับหน้าเว็บ (ไม่กลับด้าน)
+    for t in to_post:
+        send_discord(t["url"])
+        seen_ids.append(t["id"])
+        time.sleep(2)
+
+    current_ids = [t["id"] for t in tweets]
+    save_seen(list(dict.fromkeys(seen_ids + current_ids))[-100:])
+    print(f"Completed. Posted {len(to_post)} items.")
 
 if __name__ == "__main__":
     main()
