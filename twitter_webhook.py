@@ -66,27 +66,19 @@ def fetch_tweets_syndication(username):
             if entry.get("type") != "tweet":
                 continue
 
-            # ตรวจสอบว่า entry นี้ถูกมาร์กเป็น pinned หรือไม่
-            if entry.get("entryType") == "pinned" or entry.get("isPinned"):
-                continue
-
             content = entry.get("content", {})
             t = content.get("tweet", {})
             if not t or t.get("retweeted_status_id_str"):
-                continue
-            
-            # ตรวจสอบในระดับ tweet ว่าเป็น pinned หรือไม่
-            if t.get("pinned") or t.get("is_pinned"):
                 continue
 
             t_id = str(t.get("id_str"))
             raw_text = t.get("text", "")
 
-            # ตรวจสอบกรณีเป็น X Article
+            # เช็กว่าเป็น X Article หรือไม่
             urls = t.get("entities", {}).get("urls", [])
             is_article = any("/article/" in u.get("expanded_url", "") for u in urls)
 
-            # ตรวจสอบวิดีโอ หรือ Animated GIF
+            # เช็กวิดีโอ หรือ Animated GIF
             media = t.get("entities", {}).get("media", [])
             has_video = False
             img_url = None
@@ -180,37 +172,28 @@ def run():
         print("No tweets fetched.")
         return
 
-    # 1. เรียงลำดับจาก Snowflake ID มากไปน้อย เพื่อจัดทวีตใหม่สุดอยู่บน
-    sorted_tweets = sorted(
-        tweets,
-        key=lambda x: int(x["id"]) if str(x["id"]).isdigit() else 0,
-        reverse=True
-    )
+    # ตัดทวีตแรกสุด (Index 0 ซึ่งคือ Pinned Tweet) ทิ้งไปอย่างเด็ดขาด แล้วหยิบ 5 ทวีตปกติถัดมา
+    top_5_normal = tweets[1:6] if len(tweets) > 1 else tweets
 
-    # 2. คัดเลือกเฉพาะ 5 ทวีตใหม่ล่าสุด
-    top_5_newest = sorted_tweets[:5]
-
-    print(f"Fetched {len(tweets)} total tweets. Selected top 5 newest:")
-    for t in top_5_newest:
+    print(f"Fetched {len(tweets)} tweets. Top 5 normal tweets (Skipping Pin at index 0):")
+    for t in top_5_normal:
         print(f" - ID: {t['id']} | Title: {t['title'][:35]}")
 
     if is_test_mode:
-        new_tweets = top_5_newest
+        new_tweets = top_5_normal
     else:
-        new_tweets = [t for t in top_5_newest if t["id"] not in seen_ids]
+        new_tweets = [t for t in top_5_normal if t["id"] not in seen_ids]
 
     if new_tweets:
-        # 3. จัดเรียงจากน้อยไปมาก เพื่อให้ส่งโพสต์เก่าก่อน แล้วโพสต์ใหม่สุดอยู่ล่างสุดใน Discord
-        new_tweets.sort(key=lambda x: int(x["id"]) if str(x["id"]).isdigit() else 0)
-
-        for t in new_tweets:
+        # ส่งย้อนกลับ (จากเก่าในกลุ่ม 5 อัน -> ไปหาใหม่ล่าสุด) เพื่อให้โพสต์ล่าสุดอยู่ล่างสุดในแชท Discord
+        for t in reversed(new_tweets):
             post_tweet(t)
             seen_ids.append(t["id"])
             time.sleep(1.8)
 
-    # 4. อัปเดตประวัติ ID ทั้งหมด
-    current_ids = [t["id"] for t in top_5_newest]
-    all_seen = list(dict.fromkeys(seen_ids + current_ids))
+    # บันทึก ID ของทั้ง 5 โพสต์นี้รวมถึงตัว Pin เข้าประวัติทั้งหมด
+    all_current_ids = [t["id"] for t in tweets[:6]]
+    all_seen = list(dict.fromkeys(seen_ids + all_current_ids))
     save_last_ids(all_seen[-200:])
     print(f"Sync complete. Posted {len(new_tweets)} tweets.")
 
