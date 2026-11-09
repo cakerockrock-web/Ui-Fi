@@ -5,7 +5,7 @@ import requests
 
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 STORAGE_FILE = "last_tweet_ids.json"
-TARGET_USERNAME = "Trickcal_Re"  # เปลี่ยนเป็น username บัญชีเป้าหมาย (ไม่ต้องใส่ @)
+TARGET_USERNAME = "trickcal_en"
 
 def load_last_ids():
     if os.path.exists(STORAGE_FILE):
