@@ -2,10 +2,14 @@ import os
 import json
 import time
 import requests
+from datetime import datetime, timezone
 
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 STORAGE_FILE = "last_tweet_ids.json"
 USERNAME = "trickcal_en"
+
+# กำหนดเส้นตาย: 1 กันยายน 2026 เวลา 00:00:00 UTC (โพสต์ที่เก่ากว่านี้จะถูกข้ามทันที)
+CUTOFF_TIMESTAMP = datetime(2026, 9, 1, 0, 0, 0, tzinfo=timezone.utc).timestamp()
 
 def load_seen():
     if os.path.exists(STORAGE_FILE):
@@ -21,6 +25,14 @@ def save_seen(ids):
     clean = list(dict.fromkeys([str(x) for x in ids]))
     with open(STORAGE_FILE, "w", encoding="utf-8") as f:
         json.dump(clean, f, ensure_ascii=False, indent=2)
+
+def parse_twitter_date(date_str):
+    """แปลงรูปแบบเวลาของ Twitter เช่น 'Wed Sep 02 12:00:00 +0000 2026' เป็น timestamp"""
+    try:
+        dt = datetime.strptime(date_str, "%a %b %d %H:%M:%S %z %Y")
+        return dt.timestamp()
+    except Exception:
+        return 0
 
 def fetch_all_tweets():
     url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{USERNAME}"
@@ -51,11 +63,16 @@ def fetch_all_tweets():
         if not t or t.get("retweeted_status_id_str"):
             continue
 
+        # ตรวจสอบวันเวลาโพสต์: ข้ามโพสต์ที่เก่ากว่าเดือนกันยายน 2026 ทันที
+        created_at = t.get("created_at", "")
+        t_time = parse_twitter_date(created_at)
+        if t_time and t_time < CUTOFF_TIMESTAMP:
+            continue
+
         t_id = str(t.get("id_str"))
         urls = t.get("entities", {}).get("urls", [])
         is_article = any("/article/" in u.get("expanded_url", "") for u in urls)
 
-        # Article ใช้ x.com ธรรมดา / ทวีตทั่วไปใช้ fixupx
         if is_article:
             url_to_send = f"https://x.com/{USERNAME}/article/{t_id}"
         else:
@@ -63,7 +80,6 @@ def fetch_all_tweets():
 
         tweets.append({"id": t_id, "url": url_to_send})
 
-    # ดึงทั้งหมดที่มีในไทม์ไลน์รอบนั้นโดยไม่จำกัดจำนวน
     return tweets
 
 def send_discord(url):
@@ -98,7 +114,7 @@ def main():
 
     tweets = fetch_all_tweets()
     if not tweets:
-        print("No tweets found.")
+        print("No valid tweets found.")
         return
 
     if is_test:
