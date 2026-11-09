@@ -31,27 +31,33 @@ def fetch_tweets_syndication(username):
     try:
         res = requests.get(url, headers=headers, timeout=15)
         if res.status_code != 200:
+            print(f"HTTP Error: {res.status_code}")
             return []
         
         start_token = '<script id="__NEXT_DATA__" type="application/json">'
         if start_token not in res.text:
+            print("Token __NEXT_DATA__ not found")
             return []
         
         json_str = res.text.split(start_token)[1].split('</script>')[0]
         data = json.loads(json_str)
         timeline = data.get("props", {}).get("pageProps", {}).get("timeline", {}).get("entries", [])
         
-        tweets = []
+        all_tweets = []
         for entry in timeline:
             if entry.get("type") == "tweet":
                 t = entry.get("content", {}).get("tweet", {})
-                if not t or t.get("retweeted_status_id_str"):
+                if not t:
+                    continue
+                
+                # ข้าม Retweet
+                if t.get("retweeted_status_id_str"):
                     continue
                 
                 t_id = str(t.get("id_str"))
                 raw_text = t.get("text", "")
 
-                # 1. เช็กว่าเป็น X Article หรือไม่
+                # เช็กว่าเป็น X Article หรือไม่
                 urls = t.get("entities", {}).get("urls", [])
                 is_article = False
                 for u in urls:
@@ -60,7 +66,7 @@ def fetch_tweets_syndication(username):
                         is_article = True
                         break
 
-                # 2. เช็กวิดีโอ หรือ Animated GIF
+                # เช็กวิดีโอ หรือ Animated GIF
                 media = t.get("entities", {}).get("media", [])
                 has_video = False
                 img_url = None
@@ -87,7 +93,7 @@ def fetch_tweets_syndication(username):
                 if len(description) > 3000:
                     description = description[:2997] + "..."
 
-                tweets.append({
+                all_tweets.append({
                     "id": t_id,
                     "title": title,
                     "description": description,
@@ -96,7 +102,14 @@ def fetch_tweets_syndication(username):
                     "has_video": has_video,
                     "image_url": img_url
                 })
-        return tweets
+
+        # กำจัดทวีตซ้ำ (กรณี Pin ไปซ้ำกับไทม์ไลน์ปกติ)
+        unique_tweets = {t["id"]: t for t in all_tweets}.values()
+        
+        # เรียงลำดับจาก "ใหม่สุด -> เก่าสุด" ตาม Snowflake ID (ยิ่งเลขมาก แปลว่ายิ่งโพสต์ใหม่)
+        sorted_tweets = sorted(unique_tweets, key=lambda x: int(x["id"]) if x["id"].isdigit() else 0, reverse=True)
+        
+        return sorted_tweets
     except Exception as e:
         print(f"Fetch error: {e}")
         return []
@@ -153,30 +166,32 @@ def run():
         print("No tweets fetched.")
         return
 
-    # ล็อกขอบเขต: ดึงพิจารณาเฉพาะ 5 โพสต์ล่าสุดบนสุดของไทม์ไลน์เท่านั้น
-    recent_5_tweets = tweets[:5]
+    # คัดเลือก 5 โพสต์ล่าสุดจริงๆ โดยไม่สนใจว่าจะมี Pin คั่นอยู่ตรงไหน
+    top_5_tweets = tweets[:5]
+    print(f"Fetched {len(tweets)} tweets. Checking top 5 newest:")
+    for t in top_5_tweets:
+        print(f" - ID: {t['id']} | Title: {t['title'][:30]}")
 
-    # เริ่มต้นระบบครั้งแรกสุด ให้จดจำ 5 โพสต์ล่าสุดนี้ไว้ทันที
+    # รันรอบแรกสุด ให้จำ 5 โพสต์ล่าสุดนี้ไว้ทั้งหมด
     if not seen_ids:
-        save_last_ids([t["id"] for t in recent_5_tweets])
-        print("Initial run: Synced current 5 tweet IDs. No posts sent.")
+        save_last_ids([t["id"] for t in top_5_tweets])
+        print("Initial run: Synced top 5 IDs. No posts sent.")
         return
 
-    # ตรวจเฉพาะในกลุ่ม 5 โพสต์ล่าสุดว่ามี ID ไหนที่ยังไม่เคยส่ง
-    new_tweets = [t for t in recent_5_tweets if t["id"] not in seen_ids]
+    # ตรวจสอบใน 5 โพสต์ล่าสุด ว่ามีอันไหนที่ยังไม่เคยส่งเข้า Discord
+    new_tweets = [t for t in top_5_tweets if t["id"] not in seen_ids]
 
     if new_tweets:
-        # เรียงลำดับจากเก่าไปใหม่ เพื่อส่งเข้า Discord ตามลำดับเวลา
+        # เรียงลำดับส่งจากเก่าไปใหม่ เพื่อให้ทวีตเรียงไทม์ไลน์สวยๆ ใน Discord
         for t in reversed(new_tweets):
             post_tweet(t)
             seen_ids.append(t["id"])
             time.sleep(1.5)
 
-    # อัปเดต ID ทั้งหมดที่ผ่านตาลงไฟล์ ป้องกันการย้อนกลับมาส่งซ้ำ
-    current_ids = [t["id"] for t in recent_5_tweets]
-    all_seen = list(dict.fromkeys(seen_ids + current_ids))
+    # บันทึก ID ทั้งหมดที่ผ่านตาเก็บไว้ในประวัติ ป้องกันส่งซ้ำ
+    all_seen = list(dict.fromkeys(seen_ids + [t["id"] for t in top_5_tweets]))
     save_last_ids(all_seen[-200:])
-    print(f"Sync complete. New tweets posted: {len(new_tweets)}")
+    print(f"Done. Posted {len(new_tweets)} new tweets.")
 
 if __name__ == "__main__":
     run()
