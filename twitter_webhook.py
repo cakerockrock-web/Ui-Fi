@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import re
 import requests
 
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -23,7 +24,6 @@ def save_last_ids(data):
         json.dump(clean_data, f, ensure_ascii=False, indent=2)
 
 def fetch_tweets_syndication(username):
-    """ดึงทวีตสาธารณะล่าสุดโดยไม่ต้องพึ่ง Twitter Developer API Key"""
     url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -33,13 +33,11 @@ def fetch_tweets_syndication(username):
         if res.status_code != 200:
             return []
         
-        # สกัด JSON จากแท็ก __NEXT_DATA__
-        html_text = res.text
         start_token = '<script id="__NEXT_DATA__" type="application/json">'
-        if start_token not in html_text:
+        if start_token not in res.text:
             return []
         
-        json_str = html_text.split(start_token)[1].split('</script>')[0]
+        json_str = res.text.split(start_token)[1].split('</script>')[0]
         data = json.loads(json_str)
         timeline = data.get("props", {}).get("pageProps", {}).get("timeline", {}).get("entries", [])
         
@@ -47,26 +45,64 @@ def fetch_tweets_syndication(username):
         for entry in timeline:
             if entry.get("type") == "tweet":
                 t = entry.get("content", {}).get("tweet", {})
-                if not t: continue
+                if not t:
+                    continue
                 
-                # ข้ามกรณีเป็น Retweet (ถ้าต้องการเฉพาะโพสต์ของช่อง)
+                # ข้าม Retweet
                 if t.get("retweeted_status_id_str"):
                     continue
                 
                 t_id = str(t.get("id_str"))
-                text = t.get("text", "")
                 user_info = t.get("user", {})
+                raw_text = t.get("text", "")
+
+                # 1. ตรวจสอบกรณีเป็น X Article (บทความยาว)
+                article_data = t.get("article", {})
+                is_article = bool(article_data)
                 
-                # ดึงรูปแรกถ้ามีแนบมากับทวีต
-                media = t.get("entities", {}).get("media", [])
-                img_url = media[0].get("media_url_https") if media else None
+                title = ""
+                description = ""
                 
+                if is_article:
+                    title = article_data.get("title", "")
+                    description = article_data.get("preview_text", "")
+                    img_url = article_data.get("cover_media", {}).get("media_url_https")
+                    tweet_url = f"https://x.com/{username}/article/{t_id}"
+                else:
+                    tweet_url = f"https://x.com/{username}/status/{t_id}"
+                    img_url = None
+
+                # 2. กรณีเป็นทวีตปกติ
+                if not is_article:
+                    # ดึงรูปภาพจาก media entities
+                    media = t.get("entities", {}).get("media", [])
+                    if media:
+                        img_url = media[0].get("media_url_https")
+                    
+                    # ลบลิงก์รูปภาพ t.co ออกจากข้อความท้ายทวีต
+                    clean_text = re.sub(r'https://t\.co/\S+$', '', raw_text).strip()
+                    if not clean_text:
+                        clean_text = raw_text
+
+                    lines = [line.strip() for line in clean_text.split("\n") if line.strip()]
+                    if lines:
+                        title = lines[0]
+                        description = "\n".join(lines[1:]) if len(lines) > 1 else ""
+                    else:
+                        title = f"Post from @{username}"
+                        description = clean_text
+
+                # ตัดความยาวให้อยู่ในเกณฑ์ปลอดภัยของ Discord Embed
+                if len(title) > 250:
+                    title = title[:247] + "..."
+                if len(description) > 3000:
+                    description = description[:2997] + "..."
+
                 tweets.append({
                     "id": t_id,
-                    "text": text,
-                    "author_name": user_info.get("name", username),
-                    "username": user_info.get("screen_name", username),
-                    "author_icon": user_info.get("profile_image_url_https", ""),
+                    "title": title,
+                    "description": description,
+                    "tweet_url": tweet_url,
                     "image_url": img_url
                 })
         return tweets
@@ -75,7 +111,8 @@ def fetch_tweets_syndication(username):
         return []
 
 def send_to_webhook(payload):
-    if not WEBHOOK_URL: return
+    if not WEBHOOK_URL:
+        return
     for _ in range(3):
         try:
             resp = requests.post(WEBHOOK_URL, json=payload, timeout=15)
@@ -91,29 +128,29 @@ def send_to_webhook(payload):
 
 def post_tweet(tweet):
     t_id = tweet["id"]
-    tweet_url = f"https://x.com/{tweet['username']}/status/{t_id}"
+    tweet_url = tweet["tweet_url"]
     
+    # ประกอบ Embed หน้าตาตามตัวอย่าง
     embed = {
-        "author": {
-            "name": f"{tweet['author_name']} (@{tweet['username']})",
-            "url": tweet_url,
-            "icon_url": tweet["author_icon"]
-        },
-        "description": tweet["text"],
+        "title": tweet["title"],
         "url": tweet_url,
-        "color": 0x1DA1F2,
+        "description": tweet["description"] if tweet["description"] else None,
+        "color": 0x1DA1F2,  # สีฟ้าทางการของ X
         "footer": {
-            "text": f"X (Twitter) | ID: {t_id}"
+            "text": "X",
+            "icon_url": "https://abs.twimg.com/favicons/twitter.3.ico"
         }
     }
+    
     if tweet["image_url"]:
         embed["image"] = {"url": tweet["image_url"]}
 
+    # ไม่ใส่ username / avatar_url เพื่อคงรูปโปรไฟล์น้องกบของ Webhook ไว้
     payload = {
-        "username": tweet["author_name"],
-        "avatar_url": tweet["author_icon"],
+        "content": tweet_url,
         "embeds": [embed]
     }
+    
     send_to_webhook(payload)
     print(f"Posted Tweet {t_id}")
 
@@ -124,7 +161,7 @@ def run():
         print("No tweets fetched.")
         return
 
-    # รันรอบแรกสุดให้จำทวีตปัจจุบันไว้ก่อน
+    # รันครั้งแรกสุด ให้จดจำทวีตทั้งหมดเป็นฐานข้อมูล
     if not seen_ids:
         save_last_ids([t["id"] for t in tweets])
         print("Initial run: Synced current tweet IDs.")
@@ -134,16 +171,18 @@ def run():
     seen_ids = [x for x in seen_ids if x != "0"]
     new_tweets = [t for t in tweets if t["id"] not in seen_ids]
 
+    # โหมดทดสอบ: ดึงเฉพาะโพสต์บนสุด 1 โพสต์เท่านั้น
     if is_test_mode and new_tweets:
-        new_tweets = new_tweets[:2]
+        new_tweets = new_tweets[:1]
 
     if new_tweets:
-        for t in reversed(new_tweets[:5]):
+        for t in reversed(new_tweets):
             post_tweet(t)
-            if t["id"] not in seen_ids:
-                seen_ids.append(t["id"])
-            save_last_ids(seen_ids[-100:])
             time.sleep(1.5)
+
+        # บันทึก ID ปัจจุบันทั้งหมดลงไฟล์ ป้องกันการดึงโพสต์เก่าย้อนหลัง
+        all_current_ids = [t["id"] for t in tweets]
+        save_last_ids(all_current_ids[-100:])
     else:
         print("No new tweets found.")
 
