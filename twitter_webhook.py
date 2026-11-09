@@ -1,11 +1,13 @@
 import os
 import json
 import time
+import re
 import requests
 
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 STORAGE_FILE = "last_tweet_ids.json"
 TARGET_USERNAME = "trickcal_en"
+PINNED_ARTICLE_ID = "2117542439829528790"
 
 def load_last_ids():
     if os.path.exists(STORAGE_FILE):
@@ -22,58 +24,80 @@ def save_last_ids(data):
     with open(STORAGE_FILE, "w", encoding="utf-8") as f:
         json.dump(clean_data, f, ensure_ascii=False, indent=2)
 
-def fetch_tweets_fxtwitter(username):
-    # ดึงข้อมูลผ่าน FxTwitter API ซึ่งดึงตรงจากไทม์ไลน์จริง
-    url = f"https://api.fxtwitter.com/{username}"
+def fetch_tweets_syndication(username):
+    url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
     headers = {
-        "User-Agent": "DiscordBot (compatible; Mozilla/5.0)"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": f"https://twitter.com/{username}",
     }
+    
+    res = None
+    for attempt in range(3):
+        try:
+            res = requests.get(url, headers=headers, timeout=15)
+            if res.status_code == 200:
+                break
+            elif res.status_code == 429:
+                print(f"Rate limited (429). Waiting 15s before retry {attempt+1}/3...")
+                time.sleep(15)
+            else:
+                print(f"HTTP Error: {res.status_code}")
+                return []
+        except Exception as e:
+            print(f"Connection error: {e}")
+            time.sleep(3)
+            
+    if not res or res.status_code != 200:
+        return []
+
     try:
-        res = requests.get(url, headers=headers, timeout=15)
-        if res.status_code != 200:
-            print(f"FxTwitter API Error: {res.status_code}")
+        start_token = '<script id="__NEXT_DATA__" type="application/json">'
+        if start_token not in res.text:
+            print("Token __NEXT_DATA__ not found")
             return []
         
-        data = res.json()
-        raw_tweets = data.get("tweets", [])
+        json_str = res.text.split(start_token)[1].split('</script>')[0]
+        data = json.loads(json_str)
+        timeline = data.get("props", {}).get("pageProps", {}).get("timeline", {}).get("entries", [])
         
-        # กรณี API ส่งมาเป็น object เดียว ให้ห่อเป็น list
-        if not raw_tweets and "tweet" in data:
-            raw_tweets = [data["tweet"]]
-
-        parsed_tweets = []
-        for t in raw_tweets:
-            # ข้าม Retweet
-            if t.get("retweet"):
+        tweets = []
+        for entry in timeline:
+            if entry.get("type") != "tweet":
                 continue
 
-            t_id = str(t.get("id"))
-            text = t.get("text", "")
-            
-            # ตรวจสอบว่าเป็น X Article หรือไม่
-            is_article = False
-            if "/article/" in text or "x.com/i/article/" in text:
-                is_article = True
+            content = entry.get("content", {})
+            t = content.get("tweet", {})
+            if not t or t.get("retweeted_status_id_str"):
+                continue
 
-            # ตรวจสอบว่ามีวิดีโอหรือ GIF หรือไม่
+            t_id = str(t.get("id_str"))
+            
+            # ตัดทวีตปักหมุดทิ้งทันที
+            if t_id == PINNED_ARTICLE_ID or entry.get("entryType") == "pinned":
+                continue
+
+            raw_text = t.get("text", "")
+
+            urls = t.get("entities", {}).get("urls", [])
+            is_article = any("/article/" in u.get("expanded_url", "") for u in urls)
+
+            media = t.get("entities", {}).get("media", [])
             has_video = False
-            media_list = t.get("media", {})
-            videos = media_list.get("videos", [])
-            photos = media_list.get("photos", [])
+            img_url = None
             
-            if videos:
-                has_video = True
-            
-            img_url = photos[0].get("url") if photos else None
+            if media:
+                media_type = media[0].get("type", "")
+                if media_type in ["video", "animated_gif"]:
+                    has_video = True
+                else:
+                    img_url = media[0].get("media_url_https")
 
-            # กำหนด URL ทวีต
-            if is_article:
-                tweet_url = f"https://x.com/{username}/article/{t_id}"
-            else:
-                tweet_url = f"https://x.com/{username}/status/{t_id}"
+            tweet_url = f"https://x.com/{username}/article/{t_id}" if is_article else f"https://x.com/{username}/status/{t_id}"
 
-            # แยกบรรทัดชื่อเรื่องและเนื้อหา
-            lines = [line.strip() for line in text.split("\n") if line.strip()]
+            clean_text = re.sub(r'https://t\.co/\S+$', '', raw_text).strip()
+            lines = [line.strip() for line in (clean_text or raw_text).split("\n") if line.strip()]
             title = lines[0] if lines else f"Post from @{username}"
             description = "\n".join(lines[1:]) if len(lines) > 1 else ""
 
@@ -82,7 +106,7 @@ def fetch_tweets_fxtwitter(username):
             if len(description) > 3000:
                 description = description[:2997] + "..."
 
-            parsed_tweets.append({
+            tweets.append({
                 "id": t_id,
                 "title": title,
                 "description": description,
@@ -92,9 +116,9 @@ def fetch_tweets_fxtwitter(username):
                 "image_url": img_url
             })
 
-        return parsed_tweets
+        return tweets
     except Exception as e:
-        print(f"FxTwitter Fetch Error: {e}")
+        print(f"Parse error: {e}")
         return []
 
 def send_to_webhook(payload):
@@ -116,13 +140,10 @@ def send_to_webhook(payload):
 def post_tweet(tweet):
     t_id = tweet["id"]
     
-    # กรณี Article ส่งเป็นลิงก์เพียวเพื่อให้ Discord ดึงพรีวิวบทความอัตโนมัติ
     if tweet["is_article"]:
         payload = {"content": tweet["tweet_url"]}
-    # กรณีวิดีโอ/GIF ส่งผ่าน fixupx เพื่อให้กดเล่นคลิปได้ในดิสคอร์ด
     elif tweet["has_video"]:
         payload = {"content": f"https://fixupx.com/{TARGET_USERNAME}/status/{t_id}"}
-    # กรณีรูปภาพหรือข้อความทั่วไป ส่งเป็นการ์ด Embed
     else:
         embed = {
             "title": tweet["title"],
@@ -150,15 +171,15 @@ def run():
     is_test_mode = "0" in raw_saved
     seen_ids = [x for x in raw_saved if x != "0"]
 
-    tweets = fetch_tweets_fxtwitter(TARGET_USERNAME)
+    tweets = fetch_tweets_syndication(TARGET_USERNAME)
     if not tweets:
-        print("No tweets fetched from FxTwitter.")
+        print("No tweets fetched.")
         return
 
-    # คัดเลือก 5 ทวีตบนสุด
+    # คัดเลือก 5 โพสต์บนสุดตามลำดับธรรมชาติของไทม์ไลน์ (ดึงจากใหม่สุดไปเก่า)
     target_5_tweets = tweets[:5]
 
-    print(f"--- Fetched {len(tweets)} tweets. Top 5: ---")
+    print(f"--- Top {len(target_5_tweets)} Normal Tweets (Timeline Order) ---")
     for idx, t in enumerate(target_5_tweets):
         print(f" [{idx+1}] ID: {t['id']} | Title: {t['title'][:35]}")
 
@@ -167,16 +188,16 @@ def run():
     else:
         new_tweets = [t for t in target_5_tweets if t["id"] not in seen_ids]
 
-    # ส่งจากล่างขึ้นบน (เก่า -> ใหม่สุด) เพื่อให้โพสต์ล่าสุดอยู่ล่างสุดในแชท Discord
+    # ส่งย้อนกลับ (ส่งอันดับ 5 ก่อน แล้วไต่ขึ้นมาจนถึงอันดับ 1 ล่าสุด เพื่อให้ข้อความล่าสุดอยู่ล่างสุดใน Discord)
     if new_tweets:
         for t in reversed(new_tweets):
             post_tweet(t)
             seen_ids.append(t["id"])
             time.sleep(1.8)
 
-    # บันทึก ID ลงประวัติ
+    # อัปเดตประวัติ ID
     current_ids = [t["id"] for t in target_5_tweets]
-    all_seen = list(dict.fromkeys(seen_ids + current_ids))
+    all_seen = list(dict.fromkeys(seen_ids + current_ids + [PINNED_ARTICLE_ID]))
     save_last_ids(all_seen[-200:])
     print(f"Sync complete. New tweets posted: {len(new_tweets)}")
 
