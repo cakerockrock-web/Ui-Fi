@@ -22,7 +22,7 @@ def save_seen(ids):
     with open(STORAGE_FILE, "w", encoding="utf-8") as f:
         json.dump(clean, f, ensure_ascii=False, indent=2)
 
-def fetch_latest_5():
+def fetch_all_tweets():
     url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{USERNAME}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
@@ -63,8 +63,8 @@ def fetch_latest_5():
 
         tweets.append({"id": t_id, "url": url_to_send})
 
-    # ดึง 5 โพสต์บนสุด
-    return tweets[:5]
+    # ดึงทั้งหมดที่มีในไทม์ไลน์รอบนั้นโดยไม่จำกัดจำนวน
+    return tweets
 
 def send_discord(url):
     if not WEBHOOK_URL:
@@ -96,7 +96,7 @@ def main():
     else:
         is_test = True
 
-    tweets = fetch_latest_5()
+    tweets = fetch_all_tweets()
     if not tweets:
         print("No tweets found.")
         return
@@ -106,14 +106,14 @@ def main():
     else:
         to_post = [t for t in tweets if t["id"] not in seen_ids]
 
-    # ส่งเรียงตามลำดับหน้าเว็บ (ไม่กลับด้าน)
+    # ส่งเรียงตามลำดับหน้าเว็บ (บนลงล่าง)
     for t in to_post:
         send_discord(t["url"])
         seen_ids.append(t["id"])
         time.sleep(2)
 
     current_ids = [t["id"] for t in tweets]
-    save_seen(list(dict.fromkeys(seen_ids + current_ids))[-100:])
+    save_seen(list(dict.fromkeys(seen_ids + current_ids))[-200:])
     print(f"Completed. Posted {len(to_post)} items.")
 
 if __name__ == "__main__":
