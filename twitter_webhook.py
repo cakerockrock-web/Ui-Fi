@@ -74,11 +74,11 @@ def fetch_tweets_syndication(username):
             t_id = str(t.get("id_str"))
             raw_text = t.get("text", "")
 
-            # เช็กว่าเป็น X Article หรือไม่
+            # ตรวจสอบว่าเป็น X Article หรือไม่
             urls = t.get("entities", {}).get("urls", [])
             is_article = any("/article/" in u.get("expanded_url", "") for u in urls)
 
-            # เช็กวิดีโอ หรือ Animated GIF
+            # ตรวจสอบวิดีโอ หรือ Animated GIF
             media = t.get("entities", {}).get("media", [])
             has_video = False
             img_url = None
@@ -172,30 +172,33 @@ def run():
         print("No tweets fetched.")
         return
 
-    # ตัดทวีตแรกสุด (Index 0 ซึ่งคือ Pinned Tweet) ทิ้งไปอย่างเด็ดขาด แล้วหยิบ 5 ทวีตปกติถัดมา
-    top_5_normal = tweets[1:6] if len(tweets) > 1 else tweets
+    # กวาด 5 โพสต์บนสุดของไทม์ไลน์
+    target_5_tweets = tweets[:5]
 
-    print(f"Fetched {len(tweets)} tweets. Top 5 normal tweets (Skipping Pin at index 0):")
-    for t in top_5_normal:
-        print(f" - ID: {t['id']} | Title: {t['title'][:35]}")
+    print(f"Checking {len(target_5_tweets)} tweets:")
+    for idx, t in enumerate(target_5_tweets):
+        print(f" [{idx+1}] ID: {t['id']} | Title: {t['title'][:35]}")
 
+    # รวบรวมโพสต์ที่ยังไม่เคยส่ง (ตรวจทีละโพสต์จนครบทั้ง 5 อัน ไม่มีการหยุดกลางคัน)
+    new_tweets = []
     if is_test_mode:
-        new_tweets = top_5_normal
+        new_tweets = list(target_5_tweets)
     else:
-        new_tweets = [t for t in top_5_normal if t["id"] not in seen_ids]
+        for t in target_5_tweets:
+            if t["id"] not in seen_ids:
+                new_tweets.append(t)
 
+    # ส่งโพสต์เรียงจากล่างขึ้นบน (เก่า -> ใหม่ล่าสุด)
     if new_tweets:
-        # ส่งย้อนกลับ (จากเก่าในกลุ่ม 5 อัน -> ไปหาใหม่ล่าสุด) เพื่อให้โพสต์ล่าสุดอยู่ล่างสุดในแชท Discord
         for t in reversed(new_tweets):
             post_tweet(t)
             seen_ids.append(t["id"])
             time.sleep(1.8)
 
-    # บันทึก ID ของทั้ง 5 โพสต์นี้รวมถึงตัว Pin เข้าประวัติทั้งหมด
-    all_current_ids = [t["id"] for t in tweets[:6]]
-    all_seen = list(dict.fromkeys(seen_ids + all_current_ids))
+    # บันทึก ID ทั้ง 5 โพสต์นี้ลงไฟล์ เพื่อไม่ให้โพสต์ซ้ำในรอบหน้า
+    all_seen = list(dict.fromkeys(seen_ids + [t["id"] for t in target_5_tweets]))
     save_last_ids(all_seen[-200:])
-    print(f"Sync complete. Posted {len(new_tweets)} tweets.")
+    print(f"Sync complete. New tweets posted: {len(new_tweets)}")
 
 if __name__ == "__main__":
     run()
