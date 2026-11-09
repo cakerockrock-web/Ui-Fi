@@ -105,22 +105,5 @@ def main():
         print("No tweets found.")
         return
 
-    # คัดเลือกโพสต์ที่จะส่ง
-    if is_test:
-        to_post = list(tweets)
-    else:
-        to_post = [t for t in tweets if t["id"] not in seen_ids]
-
-    # ส่งจากเก่าไปใหม่ (reversed) เพื่อให้โพสต์ล่าสุดอยู่ล่างสุดในแชท Discord
-    for t in reversed(to_post):
-        send_discord(t["url"])
-        seen_ids.append(t["id"])
-        time.sleep(2)
-
-    # บันทึกประวัติเฉพาะ 5 โพสต์ที่ดึงมา
-    current_ids = [t["id"] for t in tweets]
-    save_seen(list(dict.fromkeys(seen_ids + current_ids))[-100:])
-    print(f"Completed. Posted {len(to_post)} items.")
-
 if __name__ == "__main__":
     main()
