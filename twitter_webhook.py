@@ -8,6 +8,9 @@ WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 STORAGE_FILE = "last_tweet_ids.json"
 TARGET_USERNAME = "trickcal_en"
 
+# ระบุ ID ของทวีต Pin ที่ไม่ต้องการให้ระบบดึงมาส่งเด็ดขาด
+PINNED_ARTICLE_ID = "2117542439829528790"
+
 def load_last_ids():
     if os.path.exists(STORAGE_FILE):
         try:
@@ -26,26 +29,26 @@ def save_last_ids(data):
 def fetch_tweets_syndication(username):
     url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://platform.twitter.com/",
+        "Referer": f"https://twitter.com/{username}",
     }
     
     res = None
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             res = requests.get(url, headers=headers, timeout=15)
             if res.status_code == 200:
                 break
             elif res.status_code == 429:
-                print(f"Rate limited (429). Waiting 10s before retry {attempt+1}/2...")
-                time.sleep(10)
+                print(f"Rate limited (429). Waiting 15s before retry {attempt+1}/3...")
+                time.sleep(15)
             else:
                 print(f"HTTP Error: {res.status_code}")
                 return []
         except Exception as e:
-            print(f"Fetch connection error: {e}")
+            print(f"Connection error: {e}")
             time.sleep(3)
             
     if not res or res.status_code != 200:
@@ -72,13 +75,16 @@ def fetch_tweets_syndication(username):
                 continue
 
             t_id = str(t.get("id_str"))
+            
+            # กรองทวีต Pin ออกอย่างเด็ดขาด
+            if t_id == PINNED_ARTICLE_ID or t.get("isPinned") or entry.get("isPinned"):
+                continue
+
             raw_text = t.get("text", "")
 
-            # ตรวจสอบว่าเป็น X Article หรือไม่
             urls = t.get("entities", {}).get("urls", [])
             is_article = any("/article/" in u.get("expanded_url", "") for u in urls)
 
-            # ตรวจสอบวิดีโอ หรือ Animated GIF
             media = t.get("entities", {}).get("media", [])
             has_video = False
             img_url = None
@@ -172,31 +178,28 @@ def run():
         print("No tweets fetched.")
         return
 
-    # กวาด 5 โพสต์บนสุดของไทม์ไลน์
+    # คัดเลือก 5 ทวีตปกติล่าสุดจริงๆ (ไม่มี Pin ปนแล้ว)
     target_5_tweets = tweets[:5]
 
-    print(f"Checking {len(target_5_tweets)} tweets:")
+    print(f"--- Top {len(target_5_tweets)} Normal Tweets ---")
     for idx, t in enumerate(target_5_tweets):
         print(f" [{idx+1}] ID: {t['id']} | Title: {t['title'][:35]}")
 
-    # รวบรวมโพสต์ที่ยังไม่เคยส่ง (ตรวจทีละโพสต์จนครบทั้ง 5 อัน ไม่มีการหยุดกลางคัน)
-    new_tweets = []
     if is_test_mode:
         new_tweets = list(target_5_tweets)
     else:
-        for t in target_5_tweets:
-            if t["id"] not in seen_ids:
-                new_tweets.append(t)
+        new_tweets = [t for t in target_5_tweets if t["id"] not in seen_ids]
 
-    # ส่งโพสต์เรียงจากล่างขึ้นบน (เก่า -> ใหม่ล่าสุด)
+    # ส่งย้อนกลับ (จากเก่าในกลุ่ม 5 โพสต์ -> โพสต์ใหม่ล่าสุดปิดท้ายล่างสุด)
     if new_tweets:
         for t in reversed(new_tweets):
             post_tweet(t)
             seen_ids.append(t["id"])
             time.sleep(1.8)
 
-    # บันทึก ID ทั้ง 5 โพสต์นี้ลงไฟล์ เพื่อไม่ให้โพสต์ซ้ำในรอบหน้า
-    all_seen = list(dict.fromkeys(seen_ids + [t["id"] for t in target_5_tweets]))
+    # อัปเดตประวัติ
+    current_ids = [t["id"] for t in target_5_tweets]
+    all_seen = list(dict.fromkeys(seen_ids + current_ids + [PINNED_ARTICLE_ID]))
     save_last_ids(all_seen[-200:])
     print(f"Sync complete. New tweets posted: {len(new_tweets)}")
 
