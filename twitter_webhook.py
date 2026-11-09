@@ -26,14 +26,32 @@ def save_last_ids(data):
 def fetch_tweets_syndication(username):
     url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://platform.twitter.com/",
     }
+    
+    res = None
+    for attempt in range(2):
+        try:
+            res = requests.get(url, headers=headers, timeout=15)
+            if res.status_code == 200:
+                break
+            elif res.status_code == 429:
+                print(f"Rate limited (429). Waiting 10s before retry {attempt+1}/2...")
+                time.sleep(10)
+            else:
+                print(f"HTTP Error: {res.status_code}")
+                return []
+        except Exception as e:
+            print(f"Fetch connection error: {e}")
+            time.sleep(3)
+            
+    if not res or res.status_code != 200:
+        return []
+
     try:
-        res = requests.get(url, headers=headers, timeout=15)
-        if res.status_code != 200:
-            print(f"HTTP Error: {res.status_code}")
-            return []
-        
         start_token = '<script id="__NEXT_DATA__" type="application/json">'
         if start_token not in res.text:
             print("Token __NEXT_DATA__ not found")
@@ -48,24 +66,27 @@ def fetch_tweets_syndication(username):
             if entry.get("type") != "tweet":
                 continue
 
+            # ตรวจสอบว่า entry นี้ถูกมาร์กเป็น pinned หรือไม่
+            if entry.get("entryType") == "pinned" or entry.get("isPinned"):
+                continue
+
             content = entry.get("content", {})
             t = content.get("tweet", {})
             if not t or t.get("retweeted_status_id_str"):
                 continue
             
+            # ตรวจสอบในระดับ tweet ว่าเป็น pinned หรือไม่
+            if t.get("pinned") or t.get("is_pinned"):
+                continue
+
             t_id = str(t.get("id_str"))
             raw_text = t.get("text", "")
 
-            # 1. เช็กว่าเป็น X Article หรือไม่
+            # ตรวจสอบกรณีเป็น X Article
             urls = t.get("entities", {}).get("urls", [])
-            is_article = False
-            for u in urls:
-                expanded = u.get("expanded_url", "")
-                if "/article/" in expanded:
-                    is_article = True
-                    break
+            is_article = any("/article/" in u.get("expanded_url", "") for u in urls)
 
-            # 2. เช็กวิดีโอ หรือ Animated GIF
+            # ตรวจสอบวิดีโอ หรือ Animated GIF
             media = t.get("entities", {}).get("media", [])
             has_video = False
             img_url = None
@@ -77,10 +98,7 @@ def fetch_tweets_syndication(username):
                 else:
                     img_url = media[0].get("media_url_https")
 
-            if is_article:
-                tweet_url = f"https://x.com/{username}/article/{t_id}"
-            else:
-                tweet_url = f"https://x.com/{username}/status/{t_id}"
+            tweet_url = f"https://x.com/{username}/article/{t_id}" if is_article else f"https://x.com/{username}/status/{t_id}"
 
             clean_text = re.sub(r'https://t\.co/\S+$', '', raw_text).strip()
             lines = [line.strip() for line in (clean_text or raw_text).split("\n") if line.strip()]
@@ -104,7 +122,7 @@ def fetch_tweets_syndication(username):
 
         return tweets
     except Exception as e:
-        print(f"Fetch error: {e}")
+        print(f"Parse error: {e}")
         return []
 
 def send_to_webhook(payload):
@@ -162,30 +180,27 @@ def run():
         print("No tweets fetched.")
         return
 
-    # 1. เรียงลำดับทวีตทั้งหมดที่ดึงมาได้ตาม Snowflake ID จาก "ใหม่สุด -> เก่าสุด" เสมอ
+    # 1. เรียงลำดับจาก Snowflake ID มากไปน้อย เพื่อจัดทวีตใหม่สุดอยู่บน
     sorted_tweets = sorted(
         tweets,
         key=lambda x: int(x["id"]) if str(x["id"]).isdigit() else 0,
         reverse=True
     )
 
-    # 2. คัดเลือกเฉพาะ 5 ทวีตที่ใหม่ที่สุดในไทม์ไลน์
+    # 2. คัดเลือกเฉพาะ 5 ทวีตใหม่ล่าสุด
     top_5_newest = sorted_tweets[:5]
 
-    print(f"Fetched {len(tweets)} tweets. Top 5 newest IDs:")
+    print(f"Fetched {len(tweets)} total tweets. Selected top 5 newest:")
     for t in top_5_newest:
         print(f" - ID: {t['id']} | Title: {t['title'][:35]}")
 
-    # กรณีโหมดเทส (มีเลข "0"): ให้ดึงทั้ง 5 อันนี้มาส่งทันที
     if is_test_mode:
         new_tweets = top_5_newest
     else:
-        # โหมดปกติ: ส่งเฉพาะโพสต์ที่ยังไม่อยู่ใน seen_ids
         new_tweets = [t for t in top_5_newest if t["id"] not in seen_ids]
 
     if new_tweets:
-        # 3. จัดเรียงตามลำดับเวลาเพื่อ "โพสต์จากล่างขึ้นบน" (เก่าสุดใน 5 อัน -> ใหม่ล่าสุด)
-        # ผลลัพธ์ใน Discord: โพสต์ล่าสุดจะอยู่ล่างสุดของแชทพอดี
+        # 3. จัดเรียงจากน้อยไปมาก เพื่อให้ส่งโพสต์เก่าก่อน แล้วโพสต์ใหม่สุดอยู่ล่างสุดใน Discord
         new_tweets.sort(key=lambda x: int(x["id"]) if str(x["id"]).isdigit() else 0)
 
         for t in new_tweets:
@@ -193,7 +208,7 @@ def run():
             seen_ids.append(t["id"])
             time.sleep(1.8)
 
-    # 4. บันทึก ID ของ 5 โพสต์ล่าสุดนี้ลงไฟล์เพื่อเป็นประวัติ ไม่ให้โพสต์ซ้ำอีก
+    # 4. อัปเดตประวัติ ID ทั้งหมด
     current_ids = [t["id"] for t in top_5_newest]
     all_seen = list(dict.fromkeys(seen_ids + current_ids))
     save_last_ids(all_seen[-200:])
