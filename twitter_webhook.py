@@ -51,7 +51,16 @@ def fetch_tweets_syndication(username):
                 t_id = str(t.get("id_str"))
                 raw_text = t.get("text", "")
 
-                # ตรวจสอบว่ามีคลิปวิดีโอ หรือ Animated GIF หรือไม่
+                # 1. ตรวจสอบว่าโพสต์นี้เป็น X Article หรือไม่
+                urls = t.get("entities", {}).get("urls", [])
+                is_article = False
+                for u in urls:
+                    expanded = u.get("expanded_url", "")
+                    if "/article/" in expanded:
+                        is_article = True
+                        break
+
+                # 2. ตรวจสอบว่ามีคลิปวิดีโอ หรือ Animated GIF หรือไม่
                 media = t.get("entities", {}).get("media", [])
                 has_video = False
                 img_url = None
@@ -63,21 +72,17 @@ def fetch_tweets_syndication(username):
                     else:
                         img_url = media[0].get("media_url_https")
 
-                # ตรวจสอบกรณีเป็น X Article (บทความยาว)
-                article_data = t.get("article", {})
-                is_article = bool(article_data)
-                
+                # กำหนด URL ของทวีต
                 if is_article:
-                    title = article_data.get("title", "")
-                    description = article_data.get("preview_text", "")
-                    img_url = article_data.get("cover_media", {}).get("media_url_https")
                     tweet_url = f"https://x.com/{username}/article/{t_id}"
                 else:
                     tweet_url = f"https://x.com/{username}/status/{t_id}"
-                    clean_text = re.sub(r'https://t\.co/\S+$', '', raw_text).strip()
-                    lines = [line.strip() for line in (clean_text or raw_text).split("\n") if line.strip()]
-                    title = lines[0] if lines else f"Post from @{username}"
-                    description = "\n".join(lines[1:]) if len(lines) > 1 else ""
+
+                # จัดการข้อความ
+                clean_text = re.sub(r'https://t\.co/\S+$', '', raw_text).strip()
+                lines = [line.strip() for line in (clean_text or raw_text).split("\n") if line.strip()]
+                title = lines[0] if lines else f"Post from @{username}"
+                description = "\n".join(lines[1:]) if len(lines) > 1 else ""
 
                 if len(title) > 250:
                     title = title[:247] + "..."
@@ -89,6 +94,7 @@ def fetch_tweets_syndication(username):
                     "title": title,
                     "description": description,
                     "tweet_url": tweet_url,
+                    "is_article": is_article,
                     "has_video": has_video,
                     "image_url": img_url
                 })
@@ -116,9 +122,18 @@ def send_to_webhook(payload):
 def post_tweet(tweet):
     t_id = tweet["id"]
     
-    if tweet["has_video"]:
+    # กรณี 1: เป็น X Article ให้ส่งลิงก์ article โดยตรง เพื่อให้ Discord ดึงการ์ดทางการของ X มาแสดง
+    if tweet["is_article"]:
+        payload = {
+            "content": tweet["tweet_url"]
+        }
+    # กรณี 2: เป็นคลิปวิดีโอหรือ GIF ใช้ fixupx เพื่อเปิดเครื่องเล่นคลิปในดิสคอร์ด
+    elif tweet["has_video"]:
         fixup_url = f"https://fixupx.com/{TARGET_USERNAME}/status/{t_id}"
-        payload = {"content": fixup_url}
+        payload = {
+            "content": fixup_url
+        }
+    # กรณี 3: รูปภาพหรือข้อความทั่วไป ส่งกล่อง Embed สีฟ้า
     else:
         embed = {
             "title": tweet["title"],
@@ -148,29 +163,22 @@ def run():
         print("No tweets fetched.")
         return
 
-    # ถ้าเพิ่งเริ่มรันครั้งแรกและยังไม่มี ID ในระบบ ให้จดจำของปัจจุบันไว้ทั้งหมดแล้วจบการทำงานทันที
+    # กรณีรันครั้งแรกสุด
     if not seen_ids:
         all_ids = [t["id"] for t in tweets]
         save_last_ids(all_ids)
         print("Initial run: Synced current tweet IDs. No posts sent.")
         return
 
-    # หาค่า ID สูงสุดที่เคยเห็น (ID ใหม่สุดในอดีต)
     max_seen_id = max([int(x) for x in seen_ids if x.isdigit()])
-
-    # คัดเฉพาะทวีตที่มีรหัส ID มากกว่า max_seen_id เท่านั้น (ตัดโพสต์เก่าและทวีตปักหมุดทิ้ง 100%)
     truly_new_tweets = [t for t in tweets if t["id"].isdigit() and int(t["id"]) > max_seen_id]
 
     if truly_new_tweets:
-        # เรียงลำดับจากเก่าไปใหม่ เพื่อให้โพสต์ตามลำดับเวลาถูกต้อง
         truly_new_tweets.sort(key=lambda x: int(x["id"]))
-        
-        # ป้องกันสแปม: ให้โพสต์ไม่เกิน 2 โพสต์ล่าสุดต่อการรัน 1 รอบ
         for t in truly_new_tweets[:2]:
             post_tweet(t)
             time.sleep(1.5)
 
-    # อัปเดตรายการ ID ปัจจุบันทั้งหมดลงไฟล์ (เก็บ 100 รายการล่าสุด)
     current_ids = [t["id"] for t in tweets]
     updated_ids = list(dict.fromkeys(seen_ids + current_ids))
     save_last_ids(updated_ids[-100:])
